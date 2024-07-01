@@ -3,7 +3,98 @@ const User = require('../models/User')
 const AWS = require('aws-sdk');
 const Booking = require('../models/Booking');
 const Event = require('../models/Events');
+const axios = require('axios').default;
 require('dotenv').config();
+
+async function downloadAndConvertImageToByteArray(url) {
+    try {
+        const response = await axios.get(url, { responseType: 'arraybuffer' });
+        const byteArray = Buffer.from(response.data, 'binary');
+        return byteArray;
+    } catch (error) {
+        console.error('Error downloading or converting image:', error);
+        throw error;
+    }
+}
+
+
+const verifyEventByUrl = asyncHandler(async (req, res) => {
+    const {eventid, downloadurl} = req.body;
+    const byteArray = await downloadAndConvertImageToByteArray(downloadurl);
+    try {
+        AWS.config.update({
+            accessKeyId: process.env.ACCESS_KEY,
+            secretAccessKey: process.env.ACCESS_SECRET,
+            region: 'ap-south-1'
+        })
+        
+        const rekognition = new AWS.Rekognition()
+        
+        rekognition.listCollections((err, data) => {
+            if (err) {
+                console.log(err);
+                return;
+            }
+            if (!data.CollectionIds.includes(process.env.FACE_COLLECTION)) {
+                console.log("Coudnt find collection")
+                return;
+            }
+            rekognition.searchUsersByImage({
+                "CollectionId": process.env.FACE_COLLECTION,
+                "Image": {
+                    "Bytes": byteArray
+                },
+                "MaxUsers": 1,
+                "UserMatchThreshold": 95
+            }, async (err, data) => {
+                if (err) {
+                    console.log(err);
+                    return;
+                }
+                if (data.UserMatches.length > 0) {
+                    const booking = await Booking.find({userid: data.UserMatches[0].User.UserId, eventid: eventid})
+                    if (booking.length > 1) {
+                        const notValidatedBooking = booking.filter((booking) => booking.isValidated === false);
+                        if(notValidatedBooking.length == 0){
+                            res.status(200).json({message: "Booking already validated!"})
+                            return;
+                        }
+                        else{
+                            await Booking.findByIdAndUpdate(notValidatedBooking[0]._id, {
+                                isValidated: true
+                            })
+                            res.status(200).json({message: `Welcome ${notValidatedBooking[0].userName}! ${notValidatedBooking[0].ticketNumber} Tickets`})
+                            return;
+                        }
+                    }
+                    else{
+                        if(booking.length == 0){
+                            res.status(200).json({message: "No Booking Found!"})
+                            return;
+                        }
+                        if(booking[0].isValidated === true){
+                            res.status(200).json({message: "Booking already validated!"})
+                            return;
+                        }
+                        else{
+                            await Booking.findByIdAndUpdate(booking[0]._id, {
+                                isValidated: true
+                            })
+                            res.status(200).json({message: `Welcome ${booking[0].userName}! ${booking[0].ticketNumber} Tickets`})
+                            return;
+                        }
+                    }
+                }
+                else {
+                    res.status(200).json({ message: "No Booking Found!" });
+                    return;
+                }
+            })
+        })
+    } catch (error) {
+        console.log(error)
+    }
+})
 
 const verifyEvent = asyncHandler(async (req, res) => {
     const {eventid} = req.body;
@@ -115,4 +206,4 @@ const getEvents = asyncHandler(async (req, res) => {
     res.status(200).json({success: true, Events: events})
 })
 
-module.exports = { getEvents, myEvents, createEvent, verifyEvent, verifyBooking }
+module.exports = { getEvents, myEvents, createEvent, verifyEvent, verifyBooking, verifyEventByUrl }
